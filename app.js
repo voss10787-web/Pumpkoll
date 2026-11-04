@@ -108,3 +108,146 @@ function groupPlannedJobs(jobs){const sorted=[...jobs].sort((a,b)=>{const at=sch
 function plannedScheduleHtml(jobs){const groups=groupPlannedJobs(jobs);if(!groups.length)return '<p class="muted">Inga planerade jobb ännu.</p>';const today=local(Date.now()).slice(0,10);const nearest=groups.find(g=>g.key!=='unscheduled'&&g.key>=today)?.key;return groups.map(group=>{const label=group.key==='unscheduled'?'Datum och tid ej angivet':new Date(group.key+'T12:00').toLocaleDateString('sv-SE',{weekday:'long',day:'numeric',month:'long',year:'numeric'});const opened=Object.prototype.hasOwnProperty.call(plannedOpenGroups,group.key)?plannedOpenGroups[group.key]:group.key===nearest;return `<details class="card" ${opened?'open':''} ontoggle="plannedOpenGroups['${group.key}']=this.open"><summary style="cursor:pointer;min-height:44px;font-weight:700;padding:10px 0">${esc(label)} · ${group.jobs.length} jobb</summary>${group.jobs.map(j=>`<details class="card"><summary style="cursor:pointer;min-height:44px;line-height:1.7"><strong>${scheduledTimestamp(j)===Infinity?'Tid ej angiven':new Date(j.scheduled).toLocaleTimeString('sv-SE',{hour:'2-digit',minute:'2-digit'})} · ${esc(j.name)}</strong><br><span class="muted">${esc(j.place||'Plats ej angiven')} · ${jobKindLabel(j)}</span></summary>${planningSummary(j)}<div class="row"><button class="primary" onclick="startPlanned('${j.id}')">▶ Starta jobb</button><button class="secondary" onclick="planJob('${j.id}')">Ändra</button><button class="secondary danger" onclick="deleteJob('${j.id}')">Ta bort jobb</button></div></details>`).join('')}</details>`}).join('')}
 render();
 
+
+/* Nedfällbart innehåll på samtliga huvudflikar. */
+(() => {
+  const previousRender = render;
+  const stateKey = 'pumpkoll-folds-v1';
+  let folds = {};
+  try {
+    const saved = JSON.parse(localStorage.getItem(stateKey) || '{}');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) folds = saved;
+  } catch (_) {}
+
+  function fold(content, title, id) {
+    const container = document.createElement('details');
+    container.className = 'fold-section';
+    container.open = folds[id] !== false;
+    const heading = document.createElement('summary');
+    heading.textContent = title;
+    container.append(heading);
+    content.replaceWith(container);
+    container.append(content);
+    container.addEventListener('toggle', () => {
+      folds[id] = container.open;
+      try { localStorage.setItem(stateKey, JSON.stringify(folds)); } catch (_) {}
+    });
+    return container;
+  }
+
+  render = function () {
+    previousRender();
+    const app = document.querySelector('#app');
+    const scope = tab + ':' + (tab === 'history' ? detail || 'list' : 'main');
+    const cards = [...app.children].filter(node =>
+      node.matches('div.card') && !node.classList.contains('truck')
+    );
+    const counts = {};
+    cards.forEach(card => {
+      const heading = card.querySelector('h3');
+      const title = heading ? heading.textContent.trim()
+        : card.id === 'liveMetrics' ? 'Jobbets siffror'
+        : card.querySelector('.grid') ? 'Sammanlagd statistik'
+        : card.querySelector('#jobKindFilter') ? 'Filtrera jobbtyp'
+        : '';
+      if (!title) return;
+      counts[title] = (counts[title] || 0) + 1;
+      fold(card, title, scope + ':' + title + ':' + counts[title]);
+      if (heading) heading.hidden = true;
+    });
+    const body = document.createElement('div');
+    while (app.firstChild) body.append(app.firstChild);
+    app.append(body);
+    const title = tab === 'live' ? 'Pågående och planerade jobb'
+      : tab === 'history' ? 'Jobbhistorik' : 'Statistik';
+    fold(body, title, scope + ':all');
+  };
+  render();
+})();
+
+/* Kartor öppnas först när användaren väljer en kartknapp. */
+function jobMapUrls(address) {
+  const value = String(address || '').trim();
+  if (!value) return null;
+  const url = (base, params) => {
+    const link = new URL(base);
+    Object.entries(params).forEach(([key, value]) => link.searchParams.set(key, value));
+    return link.href;
+  };
+  return {
+    appleMap: url('https://maps.apple.com/', { q: value }),
+    appleRoute: url('https://maps.apple.com/', { daddr: value, dirflg: 'd' }),
+    googleMap: url('https://www.google.com/maps/search/', { api: '1', query: value }),
+    googleRoute: url('https://www.google.com/maps/dir/', { api: '1', destination: value, travelmode: 'driving' })
+  };
+}
+
+function jobMapLinks(address) {
+  const urls = jobMapUrls(address);
+  if (!urls) return '<p class="muted">Ange gatuadress och ort för att öppna karta och vägbeskrivning.</p>';
+  const link = (href, text) => `<a class="secondary map-link" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+  return `<p class="muted">${esc(String(address).trim())}</p>
+    <p><strong>Apple Kartor</strong></p><div class="row">
+      ${link(urls.appleMap, '📍 Visa karta')}
+      ${link(urls.appleRoute, '↗ Vägbeskrivning')}
+    </div><p><strong>Google Maps</strong></p><div class="row">
+      ${link(urls.googleMap, '📍 Visa karta')}
+      ${link(urls.googleRoute, '↗ Vägbeskrivning')}
+    </div>`;
+}
+
+function jobMapPanel(job) {
+  return `<details class="card job-map"><summary>Karta & vägbeskrivning</summary>
+    ${jobMapLinks(job.place)}
+    <button class="secondary" onclick="editJobAddress('${job.id}')">Ändra adress</button>
+    </details>`;
+}
+
+function editJobAddress(id) {
+  const job = db.jobs.find(job => job.id === id);
+  if (!job) return;
+  modal(`<h3>Jobbets adress</h3><form onsubmit="event.preventDefault();saveJobAddress(this,'${id}')">
+    <label for="mapAddress">Adress / arbetsplats och ort</label>
+    <input id="mapAddress" name="address" maxlength="160" value="${esc(job.place || '')}" placeholder="Gata, nummer och ort">
+    <p class="muted">Skriv en tydlig adress så att kartan hittar rätt arbetsplats.</p>
+    <div class="row"><button class="primary">Spara adress</button>
+    <button class="secondary" type="button" onclick="closeModal()">Avbryt</button></div>
+    </form>`);
+}
+
+function saveJobAddress(form, id) {
+  const job = db.jobs.find(job => job.id === id);
+  if (!job) return;
+  const previous = job.place;
+  job.place = form.elements.namedItem('address').value.trim();
+  if (!save()) { job.place = previous; return; }
+  closeModal();
+  render();
+}
+
+const planningSummaryBeforeMaps = planningSummary;
+planningSummary = function(job) {
+  return planningSummaryBeforeMaps(job) + jobMapPanel(job);
+};
+
+function addAddressPreview() {
+  const input = document.querySelector('#modal input[name="place"]');
+  if (!input) return;
+  input.placeholder = 'Gata, nummer och ort';
+  const preview = document.createElement('details');
+  preview.className = 'card job-map';
+  const heading = document.createElement('summary');
+  heading.textContent = 'Förhandsvisa adress i kartan';
+  const links = document.createElement('div');
+  const update = () => { links.innerHTML = jobMapLinks(input.value); };
+  update();
+  input.addEventListener('input', update);
+  preview.append(heading, links);
+  input.after(preview);
+}
+
+const newJobBeforeMaps = newJob;
+newJob = function() { newJobBeforeMaps(); addAddressPreview(); };
+const planJobBeforeMaps = planJob;
+planJob = function(id) { planJobBeforeMaps(id); addAddressPreview(); };
+render();

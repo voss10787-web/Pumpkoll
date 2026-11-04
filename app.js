@@ -251,3 +251,127 @@ newJob = function() { newJobBeforeMaps(); addAddressPreview(); };
 const planJobBeforeMaps = planJob;
 planJob = function(id) { planJobBeforeMaps(id); addAddressPreview(); };
 render();
+
+/* Pumpkoll: arbetsdag, uppföljning och rapporter. */
+const workLabels={setup:'Etablering',ready:'Väntar på betong',pumping:'Pumpning',crew:'Väntar på gjutlag',break:'Rast',fault:'Maskinstopp',wash:'Tvätt / avetablering',other:'Övrigt uppehåll'};
+const workFilters={from:'',to:'',search:''};
+function workParts(j,now=Date.now()){
+  const end=j.end||now,parts={};
+  for(const [i,e] of (j.workEvents||[]).entries()){
+    const until=Math.min(end,j.workEvents[i+1]?.at??end);
+    const length=Math.max(0,until-Math.max(j.start,e.at));
+    parts[e.kind]=(parts[e.kind]||0)+length;
+  }
+  return parts;
+}
+function workKind(j){return j.workEvents?.at(-1)?.kind||'ready'}
+function loadPumpTime(j,t){if(!t.start)return 0;const end=t.empty||j.end||Date.now();if(!j.workEvents?.length)return Math.max(0,end-t.start);return j.workEvents.reduce((total,e,i)=>e.kind==='pumping'?total+Math.max(0,Math.min(end,j.workEvents[i+1]?.at??end)-Math.max(t.start,e.at)):total,0)}
+function recordWork(j,kind,at=Date.now()){
+  if(!j.workEvents?.length)j.workEvents=[{at:j.start,kind:'ready'}];
+  if(workKind(j)!==kind)j.workEvents.push({at,kind});
+}
+function workMatches(j){
+  const day=j.start?local(j.start).slice(0,10):'';
+  return (!workFilters.from||day>=workFilters.from)&&(!workFilters.to||day<=workFilters.to)&&
+    (!workFilters.search||[j.name,j.place,j.contactName,j.notes].join(' ').toLocaleLowerCase('sv').includes(workFilters.search.toLocaleLowerCase('sv')));
+}
+const kindMatchesBeforeWork=matchesJobKind;
+matchesJobKind=function(j){return kindMatchesBeforeWork(j)&&workMatches(j)};
+const metricsBeforeWork=metrics;
+metrics=function(j,now=Date.now()){
+  const m=metricsBeforeWork(j,now);
+  m.v=j.trucks.filter(t=>t.empty).reduce((v,t)=>v+(t.pumpedVolume??t.volume),0);
+  if(j.workEvents?.length){const p=workParts(j,now);m.pumping=p.pumping||0;m.wait=p.ready||0;m.other=Math.max(0,m.elapsed-m.pumping-m.wait)}
+  m.rate=m.pumping?m.v*3600000/m.pumping:0;
+  m.totalRate=m.elapsed?m.v*3600000/m.elapsed:0;
+  return m;
+};
+summary=function(j){const m=metrics(j);return `<div class="grid">${metric('Pumpad betong',num(m.v),'m³ · färdigregistrerade laster')}${metric(j.workEvents?.length?'Väntan på betong':'Tid utan lossning',dur(m.wait),j.workEvents?.length?'registrerat arbetsläge':'äldre jobb · samtliga uppehåll')}${metric('Under pumpning',num(m.rate),'m³/h · registrerad volym')}${metric('Hela jobbet',num(m.totalRate),'m³/h · inklusive alla moment')}</div>`};
+function workFields(j={}){return `<label>Kontaktperson</label><input name="contactName" maxlength="120" value="${esc(j.contactName||'')}"><label>Telefon</label><input name="contactPhone" type="tel" maxlength="50" value="${esc(j.contactPhone||'')}"><label>Anteckningar / avvikelser</label><textarea name="notes" rows="4" maxlength="10000" placeholder="T.ex. extra slang, pumpflytt eller försening">${esc(j.notes||'')}</textarea>`}
+function readWorkFields(f){return {contactName:f.elements.namedItem('contactName')?.value.trim()||'',contactPhone:f.elements.namedItem('contactPhone')?.value.trim()||'',notes:f.elements.namedItem('notes')?.value.trim()||''}}
+function appendWorkFields(j={}){const f=$('#modal form');if(!f||f.elements.namedItem('contactName'))return;const box=document.createElement('div');box.innerHTML=workFields(j);const button=f.querySelector('button');let anchor=button;while(anchor.parentElement!==f)anchor=anchor.parentElement;f.insertBefore(box,anchor)}
+const newJobBeforeWork=newJob;
+newJob=function(){newJobBeforeWork();appendWorkFields()};
+const planJobBeforeWork=planJob;
+planJob=function(id){planJobBeforeWork(id);appendWorkFields(db.jobs.find(j=>j.id===id)||{})};
+const createJobBeforeWork=createJob;
+createJob=function(f){const ids=new Set(db.jobs.map(j=>j.id));const extra=readWorkFields(f);createJobBeforeWork(f);const j=db.jobs.find(j=>!ids.has(j.id));if(j){Object.assign(j,extra,{workEvents:[{at:j.start,kind:'setup'}]});save();render()}};
+const savePlanBeforeWork=savePlan;
+savePlan=function(f,id){const ids=new Set(db.jobs.map(j=>j.id));const extra=readWorkFields(f);savePlanBeforeWork(f,id);if($('#modal').open)return;const j=id?db.jobs.find(j=>j.id===id):db.jobs.find(j=>!ids.has(j.id));if(j){Object.assign(j,extra);save();render()}};
+const startPlannedBeforeWork=startPlanned;
+startPlanned=function(id){startPlannedBeforeWork(id);const j=db.jobs.find(j=>j.id===id);if(j&&!j.planned&&active()?.id===id&&!j.workEvents?.length){j.workEvents=[{at:j.start,kind:'setup'}];save();render()}};
+function setWorkKind(kind){
+  const j=active();if(!j||!workLabels[kind])return;
+  if(kind==='pumping'&&!j.trucks.some(t=>t.start&&!t.empty))return alert('Starta först en leverans eller din egen last.');
+  recordWork(j,kind);save();render();
+}
+const stampBeforeWork=stamp;
+stamp=function(id,field){const j=active(),t=j?.trucks.find(t=>t.id===id);if(!t)return;
+  const previous=t[field];stampBeforeWork(id,field);
+  if(!previous&&t[field]){recordWork(j,field==='start'?'pumping':'ready',t[field]);save();render()}
+};
+function finishOwnAmount(id){const j=active(),t=j?.trucks.find(t=>t.id===id);if(!t||t.empty)return;
+  modal(`<h3>Avsluta egen last</h3><form onsubmit="event.preventDefault();saveOwnAmount(this,'${id}')"><p>Lastat: <b>${num(t.volume)} m³</b></p><label>Pumpat av denna last (m³)</label><input name="pumped" inputmode="decimal" required value="${t.volume}"><p class="muted">Resterande mängd sparas som kvar i bilen och räknas inte som pumpad.</p><div class="row"><button class="primary">Färdigpumpad</button><button type="button" class="secondary" onclick="closeModal()">Avbryt</button></div></form>`);
+}
+function saveOwnAmount(f,id){const j=active(),t=j?.trucks.find(t=>t.id===id),v=Number(f.pumped.value.replace(',','.'));if(!t||!Number.isFinite(v)||v<0||v>t.volume)return alert('Pumpad mängd ska vara mellan 0 och lastad mängd.');t.pumpedVolume=v;closeModal();stamp(id,'empty')}
+finishOwnPumping=function(){const t=active()?.trucks.find(t=>t.own&&t.start&&!t.empty);if(t)finishOwnAmount(t.id)};
+const truckBeforeWork=truckCard;
+truckCard=function(j,t,i,readonly=false){let html=truckBeforeWork(j,t,i,readonly);if(t.empty){const ms=loadPumpTime(j,t),v=t.pumpedVolume??t.volume;html=html.replace(/<p class="muted">(?:Lossning|Pumpning) [\s\S]*?<\/p>/,`<p class="muted">Pumpning ${dur(ms)} · ${num(ms?v*3600000/ms:0)} m³/h · total lasttid ${dur(t.empty-t.start)} · kötid ${dur(t.start-t.arrival)}</p>`)}if(t.own){html=html.replace(`stamp('${t.id}','empty')`,`finishOwnAmount('${t.id}')`);if(t.empty)html+=`<p class="card">Egen last: lastat ${num(t.volume)} m³ · pumpat ${num(t.pumpedVolume??t.volume)} m³ · kvar ${num(t.volume-(t.pumpedVolume??t.volume))} m³</p>`}return html};
+const saveOwnBeforeWork=saveOwnLoad;
+saveOwnLoad=function(f,startNow=false){const j=active(),ids=new Set(j.trucks.map(t=>t.id));saveOwnBeforeWork(f,startNow);const t=j.trucks.find(t=>!ids.has(t.id));if(t?.start){recordWork(j,'pumping',t.start);save();render()}};
+function workProgress(j){const m=metrics(j),total=j.plannedVolume,remaining=total?Math.max(0,total-m.v):null;
+  const rate=m.v>0&&m.pumping>0?m.rate:j.plannedRate;
+  const eta=remaining!==null&&rate>0?Date.now()+remaining/rate*3600000:null;
+  return `<div class="grid">${metric('Pumpat',num(m.v),'m³ · färdigregistrerade laster')}${metric('Kvar av planerat',remaining===null?'—':num(remaining),'m³')}${metric('Beräknat färdigpumpat',eta?new Date(eta).toLocaleTimeString('sv-SE',{hour:'2-digit',minute:'2-digit'}):'—',eta?date(eta):'ange mängd och takt')}</div><p class="muted">Prognosen använder uppmätt pumptakt när volym finns, annars planerad takt. Återstående volym uppdateras när en last avslutas. Kommande uppehåll och tvätt tillkommer.</p>`}
+function workPanel(j){const current=j.trucks.find(t=>t.start&&!t.empty),pending=j.trucks.find(t=>!t.start&&!t.empty);
+ const next=current?`<button class="primary" onclick="${current.own?'finishOwnPumping()':`stamp('${current.id}','empty')`}">${current.own?'✓ Egen last färdigpumpad':'✓ Bilen är tom'}</button>`:pending?`<button class="primary" onclick="stamp('${pending.id}','start')">▶ ${pending.own?'Pumpa egen last':'Börja lossa nästa bil'}</button>`:'';
+ return `<div class="card work-panel"><h3>Arbetsvy · ${workLabels[workKind(j)]||'Väntar'}</h3><div class="row">${current&&workKind(j)!=='pumping'?'<button class="primary" onclick="setWorkKind(\'pumping\')">▶ Återuppta pumpning</button>':''}${next}<button class="primary" onclick="addTruck()">＋ Bil ankommen</button>${!current?'<button class="secondary" onclick="startOwnPumping()">▶ Egen last</button>':''}<button class="secondary" onclick="workModeDialog()">Arbetsläge / uppehåll</button></div><div id="workProgress">${workProgress(j)}</div></div>`;
+}
+function workModeDialog(){const j=active();modal(`<h3>Arbetsläge / orsak till uppehåll</h3><p class="muted">Välj vad du gör nu. Under ett uppehåll fortsätter lasten vara öppen, men tiden räknas separat. Välj Pumpning när du fortsätter.</p><div class="work-choices">${Object.entries(workLabels).map(([key,label])=>`<button class="${workKind(j)===key?'primary':'secondary'}" onclick="setWorkKind('${key}');closeModal()">${label}</button>`).join('')}<button class="secondary" onclick="closeModal();editWorkLog('${j.id}')">Rätta arbetsmoment</button><button class="secondary" onclick="closeModal()">Stäng</button></div>`)}
+function editWorkInfo(id){const j=db.jobs.find(j=>j.id===id);modal(`<h3>Kontakt & anteckningar</h3><form onsubmit="event.preventDefault();saveWorkInfo(this,'${id}')">${workFields(j)}<div class="row"><button class="primary">Spara</button><button class="secondary" type="button" onclick="closeModal()">Avbryt</button></div></form>`)}
+function saveWorkInfo(f,id){const j=db.jobs.find(j=>j.id===id),previous={contactName:j.contactName,contactPhone:j.contactPhone,notes:j.notes};Object.assign(j,readWorkFields(f));if(!save()){Object.assign(j,previous);return}closeModal();render()}
+function workInfo(j){const phone=String(j.contactPhone||'').replace(/[^+0-9]/g,'');return `<details class="card"><summary>Kontakt & anteckningar</summary><p>${esc(j.contactName||'Ingen kontaktperson angiven')}${phone?` · <a href="tel:${phone}">Ring ${esc(j.contactPhone)}</a>`:''}</p><p style="white-space:pre-wrap">${esc(j.notes||'Inga anteckningar ännu.')}</p><button class="secondary" onclick="editWorkInfo('${j.id}')">Ändra kontakt / anteckningar</button></details>`}
+const planningBeforeWork=planningSummary;
+planningSummary=function(j){return planningBeforeWork(j)+workInfo(j)};
+function workBreakdown(j){return j.workEvents?.length?`<div class="card"><h3>Arbetstid per moment</h3>${Object.entries(workParts(j)).map(([kind,ms])=>`<p>${esc(workLabels[kind]||kind)}: <b>${dur(ms)}</b></p>`).join('')}<details><summary>Tidslinje</summary>${j.workEvents.map(e=>`<p>${date(e.at)} ${time(e.at)} · ${esc(workLabels[e.kind]||e.kind)}</p>`).join('')}</details></div>`:'<p class="muted">Äldre jobb saknar registrerade arbetslägen. Deras väntetid omfattar all tid utan lossning.</p>'}
+const reportBeforeWork=report;
+report=function(j){const explanation=j.workEvents?.length?'Arbetslägena avgör hur tiden fördelas. Väntan på betong, övriga uppehåll, etablering och tvätt redovisas separat.':'Äldre jobb: tid utan lossning räknas som väntan, inklusive tiden efter sista lasten.';return `<div class="row"><button class="primary" onclick="printWorkReport('${j.id}')">Dela / skriv ut jobbrapport</button><button class="secondary" onclick="editWorkTimes('${j.id}')">Rätta jobbets tider</button><button class="secondary" onclick="editWorkLog('${j.id}')">Rätta arbetsmoment</button></div>`+reportBeforeWork(j).replace(/<p class="muted">Jobbtid [\s\S]*?<\/p>/,`<p class="muted">${explanation}</p>`)+workBreakdown(j)};
+function editWorkLog(id){const j=db.jobs.find(j=>j.id===id);if(!j.workEvents?.length)return alert('Jobbet saknar arbetsmoment. Äldre jobb behåller sin tidigare tidsberäkning.');modal(`<h3>Rätta arbetsmoment</h3><p class="muted">Första momentet börjar vid jobbstart. Tiderna ska vara i ordning. Lastens tider ändras inte.</p><form onsubmit="event.preventDefault();saveWorkLog(this,'${id}')">${j.workEvents.map((e,i)=>`<div class="card"><label>Moment ${i+1}</label><select name="kind${i}">${Object.entries(workLabels).map(([k,label])=>`<option value="${k}" ${k===e.kind?'selected':''}>${label}</option>`).join('')}</select><label>Start</label><input name="at${i}" type="datetime-local" step="1" required ${i===0?'readonly':''} value="${local(e.at)}">${i?`<label><input name="remove${i}" type="checkbox"> Ta bort felregistrerat moment</label>`:''}</div>`).join('')}<div class="row"><button class="primary">Spara moment</button><button type="button" class="secondary" onclick="closeModal()">Avbryt</button></div></form>`)}
+function saveWorkLog(f,id){const j=db.jobs.find(j=>j.id===id),events=[];for(let i=0;i<j.workEvents.length;i++){if(f.elements.namedItem('remove'+i)?.checked)continue;const at=new Date(f.elements.namedItem('at'+i).value).getTime(),kind=f.elements.namedItem('kind'+i).value;if(!Number.isFinite(at)||at<j.start||at>(j.end||Date.now())||(events.length&&at<events.at(-1).at)||!Object.hasOwn(workLabels,kind))return alert('Kontrollera ordning, datum och tider för arbetsmomenten.');events.push({at,kind})}if(events[0]?.at!==j.start)return alert('Första momentet måste börja vid jobbstart.');const old=j.workEvents;j.workEvents=events;if(!save()){j.workEvents=old;return}closeModal();render()}
+function editWorkTimes(id){const j=db.jobs.find(j=>j.id===id);modal(`<h3>Rätta jobbets tider</h3><p class="muted">Ändrade tider får inte hamna innanför en leverans eller ett registrerat arbetsmoment.</p><form onsubmit="event.preventDefault();saveWorkTimes(this,'${id}')"><label>Jobbstart</label><input name="begin" type="datetime-local" step="1" required value="${local(j.start)}">${j.end?`<label>Jobbslut</label><input name="end" type="datetime-local" step="1" required value="${local(j.end)}">`:''}<button class="primary">Spara</button><button class="secondary" type="button" onclick="closeModal()">Avbryt</button></form>`)}
+function saveWorkTimes(f,id){const j=db.jobs.find(j=>j.id===id),start=new Date(f.begin.value).getTime(),end=f.elements.namedItem('end')?new Date(f.elements.namedItem('end').value).getTime():j.end;const copy={...j,start,end};const error=deliveryValidationError(copy);if(error)return alert(error);if(j.workEvents?.length){const events=j.workEvents.slice(1);if(events.some(e=>e.at<start||e.at>(end||Date.now())))return alert('Arbetsmoment ligger utanför de valda tiderna.');j.workEvents[0].at=start}j.start=start;j.end=end;save();closeModal();render()}
+function printWorkReport(id){const j=db.jobs.find(j=>j.id===id),m=metrics(j);const w=window.open('','_blank');if(!w)return alert('Tillåt att rapporten öppnas i en ny flik.');
+ w.document.write(`<!doctype html><html lang="sv"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Jobbrapport · ${esc(j.name)}</title><style>body{font:16px system-ui;max-width:900px;margin:24px auto;padding:16px;color:#173e34}table{border-collapse:collapse;width:100%;font-size:14px}td,th{padding:9px;border-bottom:1px solid #ccc;text-align:left}button{padding:14px;font:inherit}@media print{button,.hint{display:none}tr{break-inside:avoid}}</style><button onclick="window.print()">Skriv ut / spara som PDF</button><p class="hint">På iPhone: använd webbläsarens delning, eller Skriv ut för att spara/dela som PDF.</p><h1>Pumpkoll · Jobbrapport</h1><h2>${esc(j.name)}</h2><p>${esc(jobKindLabel(j))} · ${esc(j.place)}</p><p>${date(j.start)} ${time(j.start)} – ${j.end?date(j.end)+' '+time(j.end):'Pågående'}</p><p>Kontakt: ${esc(j.contactName||'—')} · ${esc(j.contactPhone||'—')}</p><p>Planerat ${j.plannedVolume?num(j.plannedVolume):'—'} m³ · pumpat <b>${num(m.v)} m³</b></p><p>Pumpning ${dur(m.pumping)} · väntan på betong ${dur(m.wait)} · hela jobbet ${dur(m.elapsed)}</p><p>Pumptakt ${num(m.rate)} m³/h · hela jobbet ${num(m.totalRate)} m³/h</p>${workBreakdown(j)}<h2>Laster</h2><table><thead><tr><th>Last</th><th>Lastat / pumpat m³</th><th>Ankomst</th><th>Start</th><th>Färdig</th></tr></thead><tbody>${j.trucks.map((t,i)=>`<tr><td>${t.own?'Egen last':'Bil '+(i+1)} ${esc(t.name)}</td><td>${num(t.volume)} / ${t.empty?num(t.pumpedVolume??t.volume):'ej klar'}</td><td>${date(t.arrival)} ${time(t.arrival)}</td><td>${t.start?date(t.start)+' '+time(t.start):'—'}</td><td>${t.empty?date(t.empty)+' '+time(t.empty):'—'}</td></tr>`).join('')}</tbody></table><h2>Anteckningar / avvikelser</h2><p style="white-space:pre-wrap">${esc(j.notes||'—')}</p><p>Underlag för fakturering. Inga priser eller fakturabelopp beräknas.</p></html>`);w.document.close();
+}
+const csvBeforeWork=csv;
+csv=function(id){const j=db.jobs.find(j=>j.id===id),m=metrics(j),q=x=>'"'+String(x??'').replace(/"/g,'""')+'"';const rows=[['Jobb',j.name],['Typ',jobKindLabel(j)],['Plats',j.place],['Kontakt',j.contactName],['Telefon',j.contactPhone],['Anteckningar',j.notes],['Pumpat m3',m.v],['Pumpning',dur(m.pumping)],['Väntan betong',dur(m.wait)],['Pumptakt m3/h',m.rate],...Object.entries(workParts(j)).map(([k,v])=>[workLabels[k],dur(v)]),[],['Last','Typ','Lastat m3','Pumpat m3','Kvar m3','Ankomst','Start','Färdig'],...j.trucks.map((t,i)=>[i+1,t.own?'Egen':'Leverans',t.volume,t.empty?(t.pumpedVolume??t.volume):'',t.empty?t.volume-(t.pumpedVolume??t.volume):'',new Date(t.arrival).toLocaleString('sv-SE'),t.start?new Date(t.start).toLocaleString('sv-SE'):'',t.empty?new Date(t.empty).toLocaleString('sv-SE'):''])];download(rows.map(r=>r.map(q).join(';')).join('\r\n'),'pumpkoll-'+date(j.start)+'.csv','text/csv;charset=utf-8')};
+const backupBeforeWork=backup;
+backup=function(){backupBeforeWork();try{localStorage.setItem('pumpkoll-last-export',String(Date.now()))}catch(_){}render()};
+function workFilterPanel(){return `<div class="card"><h3>Sök & datumfilter</h3><label>Sök jobb, adress eller anteckningar</label><input id="workSearch" value="${esc(workFilters.search)}"><div class="row"><div><label>Från datum</label><input id="workFrom" type="date" value="${workFilters.from}"></div><div><label>Till datum</label><input id="workTo" type="date" value="${workFilters.to}"></div></div><div class="row"><button class="primary" onclick="applyWorkFilter()">Visa urval</button><button class="secondary" onclick="workDateRange('week')">Denna vecka</button><button class="secondary" onclick="workDateRange('month')">Denna månad</button><button class="secondary" onclick="workDateRange('all')">Alla datum</button></div></div>`}
+function applyWorkFilter(){const from=$('#workFrom').value,to=$('#workTo').value;if(from&&to&&from>to)return alert('Från datum måste vara före Till datum.');Object.assign(workFilters,{from,to,search:$('#workSearch').value.trim()});detail=null;render()}
+function workDateRange(kind){const now=new Date(),begin=new Date(now),end=new Date(now);if(kind==='week'){begin.setDate(now.getDate()-(now.getDay()+6)%7);end.setDate(begin.getDate()+6)}else if(kind==='month'){begin.setDate(1);end.setMonth(now.getMonth()+1,0)}Object.assign(workFilters,{from:kind==='all'?'':local(begin.getTime()).slice(0,10),to:kind==='all'?'':local(end.getTime()).slice(0,10),search:''});detail=null;render()}
+const renderBeforeWork=render;
+render=function(){renderBeforeWork();const app=$('#app'),j=active();
+ if(tab==='live'&&j){const badge=app.querySelector('.row.between > .badge');if(badge)badge.textContent='● '+(workLabels[workKind(j)]||'Väntar');const box=document.createElement('section');box.className='work-top';box.innerHTML=workPanel(j);app.prepend(box)}
+ if(tab==='history'||tab==='stats'){const box=document.createElement('details');box.className='card';box.open=!!(workFilters.from||workFilters.to||workFilters.search);box.innerHTML='<summary>Sök & datumfilter</summary>'+workFilterPanel();app.prepend(box)}
+ if(tab==='stats'){const jobs=db.jobs.filter(j=>j.end&&!j.deleted&&matchesJobKind(j)),parts={};for(const j of jobs)for(const [k,v]of Object.entries(workParts(j)))parts[k]=(parts[k]||0)+v;const box=document.createElement('details');box.className='card';box.innerHTML='<summary>Arbetstid per moment i urvalet</summary>'+Object.entries(parts).map(([k,v])=>`<p>${workLabels[k]}: ${dur(v)}</p>`).join('')+'<p class="muted">Momentfördelningen omfattar jobb där arbetslägen registrerats.</p>';app.append(box);const text=[...app.querySelectorAll('p')].find(p=>p.textContent.startsWith('Väntetid:'));if(text)text.innerHTML='Väntetid: <b>'+dur(jobs.reduce((s,j)=>s+metrics(j).wait,0))+'</b>'}
+ const last=Number(localStorage.getItem('pumpkoll-last-export')||0),latest=Math.max(0,...db.jobs.filter(j=>j.end&&!j.deleted).map(j=>j.end));if(latest>last&&(tab==='history'||tab==='stats')){const reminder=document.createElement('div');reminder.className='card backup-reminder';reminder.innerHTML='<strong>Säkerhetskopiera dina jobb</strong><p>Det finns avslutade jobb sedan senaste exportförsöket. Spara kopian i Filer eller iCloud Drive.</p><button class="primary" onclick="backup()">Exportera alla jobb</button><p class="muted">Kontrollera att filen verkligen sparades på telefonen.</p>';app.prepend(reminder)}
+};
+const tickBeforeWork=tick;
+tick=function(){tickBeforeWork();if(tab==='live'&&active()&&$('#workProgress'))$('#workProgress').innerHTML=workProgress(active())};
+// Registrerade arbetsmoment bevaras vid rättning av laster; de är en separat logg.
+const updateTruckBeforeWork=updateTruck;
+updateTruck=function(f,jid,tid){const j=db.jobs.find(j=>j.id===jid),t=j?.trucks.find(t=>t.id===tid);if(t?.pumpedVolume!=null&&Number(f.volume.value.replace(',','.'))<t.pumpedVolume)return alert('Lastad mängd kan inte vara mindre än registrerad pumpad mängd.');const start=new Date(f.jobStart.value).getTime(),end=f.jobEnd?new Date(f.jobEnd.value).getTime():j.end;if(j.workEvents?.slice(1).some(e=>e.at<start||e.at>(end||Date.now())))return alert('Jobbtiderna skulle hamna innanför registrerade arbetsmoment.');updateTruckBeforeWork(f,jid,tid);if(!$('#modal').open&&j.workEvents?.length){j.workEvents[0].at=j.start;save();render()}};
+editJob=function(){const j=active();if(j)editWorkTimes(j.id)};
+const validBeforeWork=validJob;
+validJob=function(j){if(!validBeforeWork(j))return false;
+ if(j.trucks.some(t=>t.pumpedVolume!=null&&(!t.own||!Number.isFinite(t.pumpedVolume)||t.pumpedVolume<0||t.pumpedVolume>t.volume)))return false;
+ if(j.workEvents!=null){if(!Array.isArray(j.workEvents))return false;let last=0;for(const e of j.workEvents){if(!e||!Object.hasOwn(workLabels,e.kind)||!Number.isFinite(e.at)||e.at<j.start||e.at<last||e.at>(j.end||Date.now()))return false;last=e.at}}
+ return true;
+};
+const editTruckBeforeWork=editTruck;
+editTruck=function(jid,tid){editTruckBeforeWork(jid,tid);const t=db.jobs.find(j=>j.id===jid)?.trucks.find(t=>t.id===tid),form=$('#modal form');if(t?.own&&t.empty){const box=document.createElement('div');box.innerHTML=`<label>Pumpad mängd av egen last (m³)</label><input name="ownPumped" inputmode="decimal" required value="${t.pumpedVolume??t.volume}">`;form.querySelector('input[name="volume"]').after(box)}if(db.jobs.find(j=>j.id===jid)?.workEvents?.length){const p=document.createElement('p');p.className='muted';p.textContent='Lastens tider och arbetslägen är separata loggar. Rättade lasttider ändrar inte automatiskt momentfördelningen.';form.prepend(p)}};
+const updateWithWork=updateTruck;
+updateTruck=function(f,jid,tid){const t=db.jobs.find(j=>j.id===jid)?.trucks.find(t=>t.id===tid),field=f.elements.namedItem('ownPumped'),old=t?.pumpedVolume;if(field){const v=Number(field.value.replace(',','.')),loaded=Number(f.volume.value.replace(',','.'));if(!Number.isFinite(v)||v<0||v>loaded)return alert('Pumpad mängd ska vara mellan 0 och lastad mängd.');t.pumpedVolume=v}updateWithWork(f,jid,tid);if($('#modal').open){if(old===undefined)delete t.pumpedVolume;else t.pumpedVolume=old}};
+setInterval(()=>{if(tab==='live'&&active()&&$('#workProgress'))$('#workProgress').innerHTML=workProgress(active())},1000);
+render();tick();

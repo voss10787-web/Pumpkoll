@@ -372,6 +372,27 @@ validJob=function(j){if(!validBeforeWork(j))return false;
 const editTruckBeforeWork=editTruck;
 editTruck=function(jid,tid){editTruckBeforeWork(jid,tid);const t=db.jobs.find(j=>j.id===jid)?.trucks.find(t=>t.id===tid),form=$('#modal form');if(t?.own&&t.empty){const box=document.createElement('div');box.innerHTML=`<label>Pumpad mängd av egen last (m³)</label><input name="ownPumped" inputmode="decimal" required value="${t.pumpedVolume??t.volume}">`;form.querySelector('input[name="volume"]').after(box)}if(db.jobs.find(j=>j.id===jid)?.workEvents?.length){const p=document.createElement('p');p.className='muted';p.textContent='Lastens tider och arbetslägen är separata loggar. Rättade lasttider ändrar inte automatiskt momentfördelningen.';form.prepend(p)}};
 const updateWithWork=updateTruck;
-updateTruck=function(f,jid,tid){const t=db.jobs.find(j=>j.id===jid)?.trucks.find(t=>t.id===tid),field=f.elements.namedItem('ownPumped'),old=t?.pumpedVolume;if(field){const v=Number(field.value.replace(',','.')),loaded=Number(f.volume.value.replace(',','.'));if(!Number.isFinite(v)||v<0||v>loaded)return alert('Pumpad mängd ska vara mellan 0 och lastad mängd.');t.pumpedVolume=v}updateWithWork(f,jid,tid);if($('#modal').open){if(old===undefined)delete t.pumpedVolume;else t.pumpedVolume=old}};
+updateTruck=function(f,jid,tid){
+ const j=db.jobs.find(j=>j.id===jid),t=j?.trucks.find(t=>t.id===tid),field=f.elements.namedItem('ownPumped');
+ if(!j||!t)return alert('Leveransen hittades inte.');
+ const loaded=Number(f.elements.namedItem('volume').value.replace(',','.'));
+ const pumped=field?Number(field.value.replace(',','.')):t.pumpedVolume;
+ if(pumped!=null&&(!Number.isFinite(pumped)||pumped<0||pumped>loaded))return alert('Pumpad mängd ska vara mellan 0 och lastad mängd.');
+ const next={...t,volume:loaded,name:f.elements.namedItem('truckname').value.trim()};
+ if(field)next.pumpedVolume=pumped;
+ for(const k of ['arrival','start','empty']){const value=f.elements.namedItem(k).value;next[k]=value?new Date(value).getTime():null;}
+ const begin=new Date(f.elements.namedItem('jobStart').value).getTime();
+ const endField=f.elements.namedItem('jobEnd');
+ const end=endField?new Date(endField.value).getTime():j.end;
+ const copy={...j,start:begin,end,trucks:j.trucks.map(x=>x.id===tid?next:x)};
+ const error=deliveryValidationError(copy);
+ if(error){$('#deliveryError').textContent=error;return;}
+ if(j.workEvents?.slice(1).some(e=>e.at<begin||e.at>(end||Date.now()))){$('#deliveryError').textContent='Arbetsmoment ligger utanför de rättade jobbtiderna.';return;}
+ if(j.workEvents?.length)copy.workEvents=[{...j.workEvents[0],at:begin},...j.workEvents.slice(1)];
+ if(!validJob(copy)){$('#deliveryError').textContent='Kontrollera alla tider och mängder. Inga ändringar har sparats.';return;}
+ j.start=begin;j.end=end;j.trucks=copy.trucks;if(copy.workEvents)j.workEvents=copy.workEvents;
+ if(!save())return;
+ closeModal();render();
+};
 setInterval(()=>{if(tab==='live'&&active()&&$('#workProgress'))$('#workProgress').innerHTML=workProgress(active())},1000);
 render();tick();
